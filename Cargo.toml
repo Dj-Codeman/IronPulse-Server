@@ -1,0 +1,20 @@
+[package]
+name = "rustymq"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+openssl-sys = "0.9.93"
+anyhow = "^1.0.42"
+mysql = "20.0.2"
+hex = "0.4.3"
+tokio = { version = "1.32.0", features = ["full"] }
+serde = { version = "1.0.126", features = ["derive"] }
+serde_json = "1.0.64"
+serde_yaml = "0.8"
+recs = { git = "https://github.com/Dj-Codeman/recs.git" }
+system = { git = "https://github.com/Dj-Codeman/system.git" }
+pretty = { git = "https://github.com/Dj-Codeman/pretty.git" }
+logging = { git = "https://github.com/Dj-Codeman/logger.git" }
