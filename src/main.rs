@@ -1,22 +1,20 @@
-mod commands;
-mod database;
-mod functions;
-mod skel;
+pub mod commands;
+pub mod database;
+pub mod functions;
+pub mod skel;
 
-use std::{
-    io::Read,
-    net::{TcpListener, TcpStream},
-    thread,
+use {
+    commands::{complex_processor, simple_processor},
+    functions::sec_fault,
+    logging::{append_log, start_log},
+    skel::{Request, RequestCode, RequestData},
+    std::{
+        io::Read,
+        net::{TcpListener, TcpStream},
+        thread,
+    },
+    system::create_hash,
 };
-
-use crate::{
-    commands::{complex_processor, sec_fault, simple_processor},
-    skel::Responses,
-};
-
-pub use logging::{append_log, start_log};
-use skel::{Request, RequestCode, RequestData};
-use system::create_hash;
 
 pub const PROG: &str = "IronPulse_server";
 
@@ -71,8 +69,8 @@ fn handle_stream(mut tcp_stream: TcpStream) {
         .read_to_string(&mut request)
         .expect("Failed at reading the unix stream");
 
-    println!("Client Command: {}\nAck", request);
-
+    // println!("Client Command: {}\nAck", request);
+    // notice("Data recived");
     let request: Request = phrasing_request(request.clone()).unwrap();
 
     let integrity: bool = match &request {

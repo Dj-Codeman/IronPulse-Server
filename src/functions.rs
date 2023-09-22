@@ -1,8 +1,9 @@
+use std::{net::TcpStream, io::Write};
 use logging::append_log;
 use mysql::prelude::Queryable;
 use system::create_hash;
 
-use crate::{database::create_conn, PROG};
+use crate::{database::create_conn, PROG, skel::{Responses, StatCode, Payload, Integrity}};
 
 pub fn create_message_table(table_name: &str) -> bool {
     let mut conn = create_conn();
@@ -53,75 +54,6 @@ pub fn create_permission_table(table_name: &str) -> bool {
     }
 }
 
-pub fn register_to_channel(table: &str, client: &str) -> bool {
-    let mut conn = create_conn();
-    match conn.query_drop(format!(
-        r"INSERT INTO Artisan_Messenger.{}_permission (uuid) VALUES ('{}')",
-        table, client
-    )) {
-        Ok(_) => {
-            append_log(PROG, &format!("Client {} registered", client));
-            true
-        }
-        Err(e) => {
-            append_log(
-                PROG,
-                &format!(
-                    "Registering {} on {}_permission, FAILED: {}",
-                    client, table, e
-                ),
-            );
-            false
-        }
-    }
-}
-
-pub fn del_channel(table: &str) -> bool {
-    let mut conn = create_conn();
-    let drop_message: String = format!("DROP TABLE Artisan_Messenger.{}", table);
-    let drop_permission: String = format!("DROP TABLE Artisan_Messenger.{}_permission", table);
-
-    let drop_tuple = (
-        conn.query_drop(drop_message),
-        conn.query_drop(drop_permission),
-    );
-
-    match drop_tuple {
-        (Ok(_), Ok(_)) => {
-            append_log(
-                PROG,
-                &format!("The channel {} has been dropped sucessfully", table),
-            );
-            true
-        }
-        (Ok(_), Err(_)) => {
-            append_log(
-                PROG,
-                &format!("The channel {} has been partially dropped", table),
-            );
-            false
-        }
-        (Err(_), Ok(_)) => {
-            append_log(
-                PROG,
-                &format!("The channel {} has been partially dropped", table),
-            );
-            false
-        }
-        #[allow(non_snake_case)]
-        (Err(E1), Err(E2)) => {
-            append_log(
-                PROG,
-                &format!(
-                    "The channel {} could not be dropped: \n {} \n {}",
-                    table, E1, E2
-                ),
-            );
-            false
-        }
-    }
-}
-
 pub fn check_permission(table: &str, uuid: &str) -> bool {
     let mut conn = create_conn();
     let perm_query: String = format!(
@@ -164,8 +96,43 @@ pub fn payload_integrity(payload: &str) -> bool {
     }
 }
 
-// let hex_array: Vec<u8> = hex::decode(data).expect("Failed to decode");
-// let ugly_data: String = String::from_utf8(hex_array).expect("Bad sequence");
+// ? WRITTING FUNCTIONS
+pub fn sec_fault(tcp_stream: &TcpStream) {
+    let sec_fault: Responses = Responses::Code(StatCode::SecFt);
+    stream_write(sec_fault, tcp_stream);
+}
 
-// // Adding a system to diffrenciate the types of data
-// // let data: Result<Email, serde_json::Error> = serde_json::from_str(&ugly_data);
+pub fn send_ack_ds(data: String, tcp_stream: &TcpStream) {
+    let ack: Responses = Responses::Data(
+        StatCode::AckDs,
+        Payload::Data(data.clone(), Integrity::Hash(create_hash(&data))),
+    );
+    stream_write(ack, tcp_stream);
+}
+
+pub fn send_ack_dr(tcp_stream: &TcpStream) {
+    let ack: Responses = Responses::Code(StatCode::AckDr);
+    stream_write(ack, tcp_stream);
+}
+
+pub fn send_ack_ok(tcp_stream: &TcpStream) {
+    let ack: Responses = Responses::Code(StatCode::AckOk);
+    stream_write(ack, tcp_stream);
+}
+
+pub fn no_handel(tcp_stream: &TcpStream) {
+    let no_handel: Responses = Responses::Code(StatCode::NoHnd);
+    stream_write(no_handel, tcp_stream);
+}
+
+pub fn no_permission(tcp_stream: &TcpStream) {
+    let no_permission: Responses = Responses::Code(StatCode::NoPer);
+    stream_write(no_permission, tcp_stream);
+}
+
+// Not response functions
+pub fn stream_write(data: Responses, mut tcp_stream: &TcpStream) {
+    tcp_stream
+        .write(format!("{}", data).as_bytes())
+        .expect("Failed at writing onto the unix stream");
+}

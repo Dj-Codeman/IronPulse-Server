@@ -1,24 +1,18 @@
-use logging::append_log;
-use mysql::{prelude::Queryable, PooledConn};
-use std::{io::Write, net::TcpStream};
-use system::create_hash;
-
-use crate::{
-    database::create_conn,
-    functions::{
-        check_permission, create_message_table, create_permission_table, del_channel,
-        payload_integrity, register_to_channel,
+use {
+    crate::database::create_conn,
+    crate::functions::{
+        check_permission, create_message_table, create_permission_table, no_handel, no_permission,
+        payload_integrity, sec_fault, send_ack_dr, send_ack_ds, send_ack_ok,
     },
-    skel::{Integrity, Message, Payload, StatCode},
-    Responses, PROG,
+    crate::skel::Message,
+    crate::PROG,
+    logging::append_log,
+    mysql::{prelude::Queryable, PooledConn},
+    std::net::TcpStream,
+    system::create_hash,
 };
 
-pub fn complex_processor(
-    command: &str,
-    data: String,
-    register_id: String,
-    tcp_stream: &TcpStream,
-) {
+pub fn complex_processor(command: &str, data: String, register_id: String, tcp_stream: &TcpStream) {
     match command {
         "RegisterChannel" => register_channel(&data, register_id, tcp_stream),
         "DeleteChannel" => delete_channel(&data, tcp_stream),
@@ -27,20 +21,36 @@ pub fn complex_processor(
             true => store(data, tcp_stream, register_id),
             false => no_handel(tcp_stream),
         },
-        "Check" => check_msg(&data, register_id, tcp_stream),
+        "Check" => {
+            check_msg(&data, &register_id, tcp_stream);
+            append_log(
+                PROG,
+                &format!("Client {} has checked meessages", register_id),
+            );
+        }
+        "Ack" => {
+            append_log(
+                PROG,
+                &format!(
+                    "Ack recived by {}, with this data hash: {}",
+                    register_id,
+                    create_hash(&data)
+                ),
+            );
+            ack_msg(&data, register_id, tcp_stream);
+        }
         &_ => no_handel(tcp_stream),
     }
 }
 
-pub fn simple_processor(command: &str, register_id: String, tcp_stream: &TcpStream) {
+pub fn simple_processor(command: &str, _: String, tcp_stream: &TcpStream) {
     match command {
-        "Ack" => ack_msg(register_id, tcp_stream),
         &_ => no_handel(tcp_stream),
     }
 }
 
 fn create_channel(data: &str, _reg: String, tcp_stream: &TcpStream) {
-    let magic = (create_message_table(data), create_permission_table(data));
+    let magic: (bool, bool) = (create_message_table(data), create_permission_table(data));
 
     let result: bool = match magic {
         (true, true) => true,
@@ -74,15 +84,76 @@ fn create_channel(data: &str, _reg: String, tcp_stream: &TcpStream) {
 }
 
 fn register_channel(data: &str, reg: String, tcp_stream: &TcpStream) {
-    // insert regid into the data_permission table
-    match register_to_channel(data, &reg) {
+    let mut conn = create_conn();
+    let result: bool = match conn.query_drop(format!(
+        r"INSERT INTO Artisan_Messenger.{}_permission (uuid) VALUES ('{}')",
+        data, reg
+    )) {
+        Ok(_) => {
+            append_log(PROG, &format!("Client {} registered", reg));
+            true
+        }
+        Err(e) => {
+            append_log(
+                PROG,
+                &format!("Registering {} on {}_permission, FAILED: {}", reg, data, e),
+            );
+            false
+        }
+    };
+
+    match result {
         true => send_ack_dr(tcp_stream),
         false => no_handel(tcp_stream),
     };
 }
 
 fn delete_channel(data: &str, tcp_stream: &TcpStream) {
-    match del_channel(&data) {
+    let mut conn = create_conn();
+    let drop_message: String = format!("DROP TABLE Artisan_Messenger.{}", data);
+    let drop_permission: String = format!("DROP TABLE Artisan_Messenger.{}_permission", data);
+
+    let drop_tuple = (
+        conn.query_drop(drop_message),
+        conn.query_drop(drop_permission),
+    );
+
+    let result: bool = match drop_tuple {
+        (Ok(_), Ok(_)) => {
+            append_log(
+                PROG,
+                &format!("The channel {} has been dropped sucessfully", data),
+            );
+            true
+        }
+        (Ok(_), Err(_)) => {
+            append_log(
+                PROG,
+                &format!("The channel {} has been partially dropped", data),
+            );
+            false
+        }
+        (Err(_), Ok(_)) => {
+            append_log(
+                PROG,
+                &format!("The channel {} has been partially dropped", data),
+            );
+            false
+        }
+        #[allow(non_snake_case)]
+        (Err(E1), Err(E2)) => {
+            append_log(
+                PROG,
+                &format!(
+                    "The channel {} could not be dropped: \n {} \n {}",
+                    data, E1, E2
+                ),
+            );
+            false
+        }
+    };
+
+    match result {
         true => send_ack_ok(tcp_stream),
         false => no_handel(tcp_stream),
     };
@@ -127,17 +198,25 @@ fn store(data: String, tcp_stream: &TcpStream, reg_id: String) {
                 append_log(PROG, "Message Saved");
                 send_ack_dr(tcp_stream);
             }
-            // if the query failes
             Err(e) => {
-                no_handel(tcp_stream);
                 append_log(PROG, &format!("Storing message failed with: {}", e));
+                no_handel(tcp_stream);
             }
         },
-        false => no_permission(tcp_stream),
+        false => {
+            append_log(
+                PROG,
+                &format!(
+                    "Permission denied while acessing channel {}, by client {}",
+                    channel, reg_id
+                ),
+            );
+            no_permission(tcp_stream);
+        }
     }
 }
 
-fn check_msg(channel: &str, reg: String, tcp_stream: &TcpStream) {
+fn check_msg(channel: &str, reg: &str, tcp_stream: &TcpStream) {
     let mut conn: PooledConn = create_conn();
 
     match check_permission(&channel, &reg) {
@@ -174,24 +253,7 @@ fn check_msg(channel: &str, reg: String, tcp_stream: &TcpStream) {
                         match hash_check {
                             true => {
                                 send_ack_ds(message_data, tcp_stream);
-                                // Marking message delivered
-                                let delivered: String = format!(
-                                    r"UPDATE Artisan_Messenger.{} SET processed = '1' WHERE uuid = '{}'",
-                                    &channel, message_integrity
-                                );
-                                // Go lang logic here ? love it
-                                match conn.query_drop(delivered) {
-                                    Ok(_) => {
-                                        append_log(PROG, &format!("Delivered {}", message_integrity))
-                                    }
-                                    Err(e) => append_log(
-                                        PROG,
-                                        &format!(
-                                            "Couldn't mark {} as delivered got: {}",
-                                            message_integrity, e
-                                        ),
-                                    ),
-                                };
+                                // Marking message deliveredI
                             }
                             false => sec_fault(tcp_stream),
                         }
@@ -204,50 +266,30 @@ fn check_msg(channel: &str, reg: String, tcp_stream: &TcpStream) {
     }
 }
 
-fn ack_msg(hash: String, tcp_stream: &TcpStream) {
-    send_ack_ok(tcp_stream);
-    match hash {
-        _ => todo!(),
-    }
-}
+fn ack_msg(data: &str, _: String, tcp_stream: &TcpStream) {
+    // No perm check because we mark done based on the message hex
+    let mut conn: PooledConn = create_conn();
+    let data_array: Vec<String> = data.split('_').map(|s| s.to_string()).collect();
 
-// ? WRITTING FUNCTIONS
-pub fn sec_fault(tcp_stream: &TcpStream) {
-    let sec_fault: Responses = Responses::Code(StatCode::SecFt);
-    stream_write(sec_fault, tcp_stream);
-}
+    let channel: String = String::from(data_array[0].clone());
+    let message: String = String::from(data_array[1].clone());
 
-pub fn send_ack_ds(data: String, tcp_stream: &TcpStream) {
-    let ack: Responses = Responses::Data(
-        StatCode::AckDs,
-        Payload::Data(data.clone(), Integrity::Hash(create_hash(&data))),
+    let delivered: String = format!(
+        r"UPDATE Artisan_Messenger.{} SET processed = '1' WHERE message = '{}'",
+        channel, message
     );
-    stream_write(ack, tcp_stream);
-}
 
-pub fn send_ack_dr(tcp_stream: &TcpStream) {
-    let ack: Responses = Responses::Code(StatCode::AckDr);
-    stream_write(ack, tcp_stream);
-}
-
-pub fn send_ack_ok(tcp_stream: &TcpStream) {
-    let ack: Responses = Responses::Code(StatCode::AckOk);
-    stream_write(ack, tcp_stream);
-}
-
-pub fn no_handel(tcp_stream: &TcpStream) {
-    let no_handel: Responses = Responses::Code(StatCode::NoHnd);
-    stream_write(no_handel, tcp_stream);
-}
-
-pub fn no_permission(tcp_stream: &TcpStream) {
-    let no_permission: Responses = Responses::Code(StatCode::NoPer);
-    stream_write(no_permission, tcp_stream);
-}
-
-// Not response functions
-pub fn stream_write(data: Responses, mut tcp_stream: &TcpStream) {
-    tcp_stream
-        .write(format!("{}", data).as_bytes())
-        .expect("Failed at writing onto the unix stream");
+    match conn.query_drop(delivered) {
+        Ok(_) => {
+            append_log(PROG, &format!("Delivered {}", message));
+            send_ack_ok(tcp_stream);
+        }
+        Err(e) => {
+            append_log(
+                PROG,
+                &format!("Couldn't mark {} as delivered got: {}", message, e),
+            );
+            no_handel(tcp_stream);
+        }
+    };
 }
